@@ -1,5 +1,6 @@
-// filter:对应 subject_filter（允许 printf，空输入不报错）
-// Allowed functions: read, strlen, malloc, calloc, realloc, free, printf, perror
+// filter:
+// Allowed functions: read, strlen, malloc, calloc, realloc, free, printf,
+perror
 // ------------------------------------------------------------------------------
 
 // Write a programm taht will take one and only one argument s.
@@ -22,173 +23,159 @@
 // If the program is called whitout argument or with an empty argument or with
 // multiples arguments it must return 1.
 
-
-/* filter_subject.c — 对应 subject_filter
- * 说明：这个版本允许使用 printf 输出，且当 stdin 为空时程序返回 0（不视为空输入为错误）。
+/* filter.c — 题目允许函数：
+ * read, strlen, malloc, calloc, realloc, free, printf, perror
+ *
+ * 功能：从 stdin 读取全部内容，把每次出现的 argv[1] 替换为 '*'（同长度的星号），
+ * 并把结果写到 stdout。参数必须且仅且非空，否则返回 1。
+ *
+ * 下面的实现：
+ * - 只使用允许的函数；
+ * - 所有循环均使用 while（没有 for）；
+ * - 每个函数前有简单说明，代码逐行中文注释，便于高中生理解。
  */
 
-/* 下面是包含的头文件及其用途：
- * <stdlib.h>  — 提供 malloc/free/realloc/exit 等内存与退出接口。
- * <unistd.h>  — 提供 read/write/STDIN_FILENO 等 POSIX I/O 接口。
- * <string.h>  — 提供 strlen/memcpy 等字符串/内存操作函数。
- * <stdio.h>   — 提供 printf/perror 等标准 I/O 函数（本版本允许使用 printf）。
- * <errno.h>   — 提供 errno 常量，用于判断 read 被中断等错误情况。
+#include <errno.h> /* errno, EINTR */
+#include <stdio.h> /* printf, perror */
+#include <stdlib.h> /* malloc, realloc, free */
+#include <string.h> /* strlen */
+#include <unistd.h> /* read */
+
+	/* 函数说明（高中生能懂）：
+		* safe_append：把新读到的一段数据追加到动态缓冲区里。
+		* 如果内存分配失败返回 -1，成功返回 0。
+		*/
+	static int
+	safe_append(char **buf, size_t *total, const char *chunk, ssize_t n)
+{
+	char *tmp;        /* 临时指针，保存 realloc 返回值 */
+	size_t old;       /* 原来缓冲里面的字节数 */
+	size_t new_total; /* 追加后的总字节数 */
+	/* 记录旧长度 */
+	old = *total;
+	/* 计算新总长度 */
+	new_total = old + (size_t)n;
+	/* 重新分配内存，新长度加 1 用来放终止符 '\0' */
+	tmp = (char *)realloc(*buf, new_total + 1);
+	if (tmp == NULL) /* realloc 失败 */
+		return (-1); /* 返回错误标志 */
+	*buf = tmp;      /* 更新外部 buf 指针 */
+	/* 将新读取的数据逐字复制到 buf 的尾部（不能用 memcpy） */
+	{
+		size_t k = 0;         /* 复制索引从 0 开始 */
+		while (k < (size_t)n) /* 复制 n 字节 */
+		{
+			(*buf)[old + k] = chunk[k]; /* 逐字赋值 */
+			k = k + 1;                  /* k++ */
+		}
+	}
+	/* 添加字符串终止符，方便 printf 使用 */
+	(*buf)[new_total] = '\0';
+	/* 更新外部记录的总长度 */
+	*total = new_total;
+	return (0); /* 成功 */
+}
+
+// /* 函数说明（高中生能懂）：
+//  * replace_inplace：在 buf（长度 len）中查找所有 pat，并就地把每个匹配替换为 '*'。
+//  * 替换行为与 sed 's/pat/***/g' 类似；匹配后跳过已替换段（不在替换后的 '*' 上再次匹配）。
+
+static void	replace_inplace(char *buf, size_t len, const char *pat,
+		size_t patlen)
+{
+	size_t i; /* 主扫描索引 */
+	/* 若模式为空或缓冲为空或模式比缓冲长，则直接返回 */
+	if (patlen == 0 || len == 0 || patlen > len)
+		return ;
+	i = 0;                    /* 从缓冲起点开始扫描 */
+	while (i + patlen <= len) /* 只要剩余长度足够匹配 就继续 */
+	{
+		size_t j = 0;  /* 模式匹配时的内部索引 */
+		int match = 1; /* 先假设匹配成功 */
+		/* 逐字符比较 buf[i + j] 与 pat[j] */
+		while (j < patlen)
+		{
+			if (buf[i + j] != pat[j]) /* 一旦有不相等 */
+			{
+				match = 0; /* 标记为不匹配 */
+				break ;     /* 退出比较循环 */
+			}
+			j = j + 1; /* j++ */
+		}
+		if (match) /* 如果匹配成功 */
+		{
+			/* 就地把匹配段替换成 '*' */
+			j = 0;
+			while (j < patlen)
+			{
+				buf[i + j] = '*'; /* 把每个字符替换为星号 */
+				j = j + 1;
+			}
+			/* 跳过已替换区域，继续扫描后面的内容 */
+			i = i + patlen;
+		}
+		else
+		{
+			/* 当前不是匹配，向右移动一个字符继续扫描 */
+			i = i + 1;
+		}
+	}
+}
+
+/* 函数说明（高中生能懂）：
+ * main：程序入口。检查参数；从 stdin 读取全部内容（用 read），
+ * 把内容累积到动态缓冲；执行替换；把结果打印到 stdout。
+ * 遇到 read 或 内存分配 错误，调用 perror("Error") 输出错误信息并返回 1。
  */
-
-#include <stdlib.h>   /* malloc/free/realloc/exit 等函数声明 */
-#include <unistd.h>   /* read/write/STDIN_FILENO 等 POSIX I/O 声明 */
-#include <string.h>   /* strlen, memcpy 等字符串/内存操作声明 */
-#include <stdio.h>    /* printf, perror 等标准输入输出声明 */
-#include <errno.h>    /* errno 及错误码定义 */
-
- /* 判断字符是否为“单词字符”（我定义为字母或数字） */
-int is_word_char(char c) /* 函数：判断 c 是否是字母或数字，返回 1 表示是 */
+int	main(int argc, char **argv)
 {
-    int res;              /* 存放判断结果的临时变量 */
-    res = 0;              /* 初始化为 0（不是单词字符） */
-    if (c >= '0' && c <= '9') /* 如果 c 在 '0'..'9' 范围内 */
-        res = 1;          /* 标记为单词字符 */
-    if (c >= 'a' && c <= 'z') /* 如果 c 在 'a'..'z' 范围内 */
-        res = 1;          /* 标记为单词字符 */
-    if (c >= 'A' && c <= 'Z') /* 如果 c 在 'A'..'Z' 范围内 */
-        res = 1;          /* 标记为单词字符 */
-    return res;           /* 返回判断结果 */
+	char readbuf[4096]; /* 每次 read 时的临时缓冲 */
+	ssize_t n;          /* read 返回的字节数 */
+	char *input = NULL; /* 动态缓冲，保存全部输入 */
+	size_t total = 0;   /* 已保存的字节数 */
+	size_t patlen;      /* 模式长度 */
+	/* 参数检查：必须且仅且非空的一个参数 */
+	if (argc != 2 || argv[1][0] == '\0')
+		/* 题目要求这种情况返回 1；不使用 fprintf（未允许） */
+		return (1);
+	/* 循环读取 stdin，直到 EOF 或出现错误 */
+	while (1)
+	{
+		/* 从文件描述符 0（stdin）读取最多 sizeof(readbuf) 字节 */
+		n = read(0, readbuf, sizeof(readbuf));
+		if (n == -1) /* read 出错 */
+		{
+			if (errno == EINTR) /* 如果是被信号中断，重试读取 */
+				continue ;
+			/* 其它错误：按题目要求输出 "Error: <errmsg>" 到 stderr */
+			perror("Error");
+			free(input); /* 释放可能已经分配的内存 */
+			return (1);  /* 返回错误码 1 */
+		}
+		if (n == 0) /* EOF（没有更多数据） */
+			break ;  /* 跳出读取循环 */
+		/* 把这次读取到的数据追加到动态缓冲 input 中 */
+		if (safe_append(&input, &total, readbuf, n) == -1)
+		{
+			/* 内存分配失败（realloc 返回 NULL）时，perror 输出错误 */
+			perror("Error");
+			free(input);
+			return (1);
+		}
+	}
+	/* 如果没有任何输入（空输入），按题目允许情况下返回 0（成功） */
+	if (total == 0)
+	{
+		free(input); /* free(NULL) 是安全的 */
+		return (0);
+	}
+	/* 计算模式长度并执行替换（若模式非空） */
+	patlen = strlen(argv[1]);
+	if (patlen > 0)
+		replace_inplace(input, total, argv[1], patlen);
+	/* 使用 printf 输出最终结果（题目允许 printf） */
+	printf("%s", input);
+	/* 清理内存并正常退出 */
+	free(input);
+	return (0);
 }
-
-/* 将 read 得到的 chunk（长度 n）追加到动态缓冲区 *buf，更新 *total */
-int safe_append(char **buf, size_t *total, const char *chunk, ssize_t n)
-{
-    char *tmp;            /* 用于暂时保存 realloc 返回的新指针 */
-    size_t old;           /* 旧的总长度 */
-    size_t new_total;     /* 扩容后的新长度 */
-
-    old = *total;         /* 读取当前已存总长度 */
-    new_total = old + (size_t)n; /* 计算追加后的新总长度 */
-
-    /* realloc 成 new_total + 1 字节，最后留 1 字节放 '\0' */
-    tmp = realloc(*buf, new_total + 1); /* 重新分配内存（可能增长） */
-    if (tmp == NULL)      /* 如果 realloc 失败 */
-        return -1;        /* 返回 -1 表示错误 */
-
-    *buf = tmp;           /* 更新外部 buf 指针为 realloc 返回值 */
-
-    /* 把新读取的数据复制到 buf 的尾部 */
-    memcpy(*buf + old, chunk, (size_t)n); /* 将 chunk 数据拷贝到新空间 */
-
-    /* 在字符串末尾放置 '\0' 以方便 printf 等函数使用 */
-    (*buf)[new_total] = '\0'; /* 以 NUL 终止字符串 */
-
-    *total = new_total;    /* 更新外部记录的总长度 */
-    return 0;              /* 返回 0 表示成功 */
-}
-
-/* 在 buf 中查找 pattern 并就地替换为 '*'（仅在单词边界处替换） */
-void replace_inplace(char *buf, size_t len, const char *pat, size_t patlen)
-{
-    size_t i;             /* 主扫描索引 */
-
-    i = 0;                /* 从头开始扫描 */
-    /* 当还有足够的字符可以与 pattern 比对时继续 */
-    while (i + patlen <= len)
-    {
-        /* 如果当前位置左侧是缓冲区起点或左侧不是单词字符，可能是单词起点 */
-        if (i == 0 || !is_word_char(buf[i - 1]))
-        {
-            size_t j;     /* 内部匹配索引 */
-            int match;    /* 标记是否匹配 */
-            match = 1;    /* 先假设匹配成功 */
-
-            j = 0;        /* 从 pattern 的第 0 个字符开始比较 */
-            while (j < patlen) /* 逐字符比较 pattern 与 buf 子串 */
-            {
-                if (buf[i + j] != pat[j]) /* 如果任一字符不相等 */
-                {
-                    match = 0; /* 标记为不匹配 */
-                    break;     /* 提前退出比较循环 */
-                }
-                j = j + 1;   /* 比较下一个字符 */
-            }
-
-            /* 如果 pattern 全部匹配，再检查右侧是否为单词边界 */
-            if (match)
-            {
-                if (i + patlen == len || !is_word_char(buf[i + patlen]))
-                {
-                    /* 左右都为单词边界，执行替换为 '*' */
-                    j = 0;
-                    while (j < patlen)
-                    {
-                        buf[i + j] = '*'; /* 就地替换每个匹配字符 */
-                        j = j + 1;
-                    }
-                    /* 跳过已替换的部分继续扫描，避免重复从已替换处开始 */
-                    i = i + patlen;
-                    continue; /* 继续主循环 */
-                }
-            }
-        }
-        /* 若未替换或不符合条件，向后移动一位继续扫描 */
-        i = i + 1;
-    }
-}
-
-/* 主程序：读取 stdin，累积到内存，替换后用 printf 输出（本 subject 允许） */
-int main(int argc, char **argv)
-{
-    char readbuf[4096];   /* 临时读取缓冲区，用于每次 read */
-    ssize_t n;            /* read 返回的字节数 */
-    char *input;          /* 动态缓冲区，保存全部 stdin 内容 */
-    size_t total;         /* input 当前已保存的总字节数 */
-    size_t patlen;        /* pattern 的长度 */
-
-    /* 参数检查：必须提供要替换的单词 */
-    if (argc < 2)
-    {
-        fprintf(stderr, "usage: %s <word>\n", argv[0]); /* 打印用法到 stderr */
-        return 1; /* 参数错误返回 1 */
-    }
-
-    input = NULL;         /* 初始时没有分配缓冲区 */
-    total = 0;            /* 已读字节数为 0 */
-
-    /* 循环读取 stdin，直到 EOF 或错误 */
-    while (1)
-    {
-        n = read(0, readbuf, sizeof(readbuf)); /* 从 fd 0（stdin）读取数据 */
-        if (n == -1)      /* read 出错 */
-        {
-            if (errno == EINTR) /* 如果被信号中断 */
-                continue; /* 重试读取 */
-            perror("read"); /* 其它错误打印 perror 并退出 */
-            free(input);    /* 释放已分配的内存 */
-            return 1;
-        }
-        if (n == 0)       /* EOF（正常结束） */
-            break;        /* 退出读取循环 */
-
-        /* 将这次读取的数据追加到动态缓冲区 input 中 */
-        if (safe_append(&input, &total, readbuf, n) == -1)
-        {
-            perror("realloc"); /* 内存分配失败时打印 perror */
-            free(input);
-            return 1;
-        }
-    }
-
-    /* 如果没有任何输入（total == 0），本 subject 允许直接成功返回 0（不视为空输入为错误） */
-    if (total == 0)
-    {
-        free(input);      /* 释放可能为 NULL 的指针（safe） */
-        return 0;         /* 返回 0 表示成功 */
-    }
-
-    patlen = strlen(argv[1]); /* 计算 pattern 的长度（用于替换函数） */
-    if (patlen > 0)       /* 若 pattern 非空才执行替换 */
-        replace_inplace(input, total, argv[1], patlen); /* 就地替换 */
-
-    printf("%s", input);  /* 使用 printf 输出结果（本版本允许使用 printf） */
-
-    free(input);         /* 释放动态缓冲区 */
-    return 0;            /* 正常退出 */
-}
-
